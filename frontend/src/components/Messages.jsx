@@ -12,11 +12,11 @@ const Messages = () => {
     const [isVideoCallActive, setIsVideoCallActive] = useState(false);
     const [incomingCall, setIncomingCall] = useState(null);
     const { socket } = useSelector(store => store.socket);
-    const { authUser } = useSelector(store => store.user);
+    const { authUser, selectedUser, onlineUsers } = useSelector(store => store.user);
     useGetMessages();
     useGetRealTimeMessage();
     const { messages } = useSelector(store => store.message);
-    const { selectedUser } = useSelector(store => store.user);
+    // 重複した selectedUser の宣言を削除
 
     useEffect(() => {
         if (!socket) return;
@@ -71,13 +71,25 @@ const Messages = () => {
 
     return (
         <>
-            <div className="flex justify-between items-center px-4 py-2 bg-gray-700">
-                <h2 className="text-white">{selectedUser?.fullName}</h2>
+            <div className="flex items-center justify-between p-4 bg-zinc-800">
+                <div className="flex items-center gap-3">
+                    <div className={`avatar ${onlineUsers?.includes(selectedUser?._id) ? 'online' : ''}`}>
+                        <div className="w-12 rounded-full">
+                            <img src={selectedUser?.profilePhoto} alt="user-profile" />
+                        </div>
+                    </div>
+                    <div className="flex flex-col flex-1">
+                        <div className="flex gap-2">
+                            <p className="text-white">{selectedUser?.fullName}</p>
+                        </div>
+                    </div>
+                </div>
                 <button 
                     onClick={handleMakeCall}
-                    className="text-white p-2 hover:bg-gray-600 rounded-full"
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
                 >
                     <BsCameraVideo size={20} />
+                    <span>Video Call</span>
                 </button>
             </div>
             <div className='px-4 flex-1 overflow-auto'>

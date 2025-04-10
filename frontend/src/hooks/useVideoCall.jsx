@@ -3,6 +3,8 @@ import { Peer } from 'peerjs';
 import { useSelector } from 'react-redux';
 
 const useVideoCall = () => {
+    // Add new state for peer status
+    const [peerStatus, setPeerStatus] = useState('disconnected');
     const [peer, setPeer] = useState(null);
     const [localStream, setLocalStream] = useState(null);
     const [remoteStream, setRemoteStream] = useState(null);
@@ -10,31 +12,52 @@ const useVideoCall = () => {
     const [currentCall, setCurrentCall] = useState(null);
     
     const { socket } = useSelector(store => store.socket);
-    const { authUser } = useSelector(store => store.user);  // Update selector to match your store
+    const { authUser } = useSelector(store => store.user);
     
     const localVideoRef = useRef();
     const remoteVideoRef = useRef();
 
-    // Initialize media stream when component mounts
+    const endCall = () => {
+        if (currentCall) {
+            currentCall.close();
+            setCurrentCall(null);
+        }
+        if (remoteStream) {
+            remoteStream.getTracks().forEach(track => track.stop());
+            setRemoteStream(null);
+        }
+        if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null;
+        }
+        setCallStatus('idle');
+    };
+
+    // Initialize media stream first
     useEffect(() => {
-        const initializeStream = async () => {
+        let mounted = true;
+        const initStream = async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: true,
-                    audio: true
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
                 });
-                setLocalStream(stream);
-                if (localVideoRef.current) {
-                    localVideoRef.current.srcObject = stream;
+                if (mounted) {
+                    setLocalStream(stream);
+                    if (localVideoRef.current) {
+                        localVideoRef.current.srcObject = stream;
+                        await localVideoRef.current.play().catch(e => console.error('Local play error:', e));
+                    }
                 }
             } catch (err) {
                 console.error('Failed to get media devices:', err);
             }
         };
-
-        initializeStream();
-
+        initStream();
         return () => {
+            mounted = false;
             if (localStream) {
                 localStream.getTracks().forEach(track => track.stop());
             }
@@ -43,173 +66,196 @@ const useVideoCall = () => {
 
     // Initialize peer connection
     useEffect(() => {
-        if (!authUser?._id) return;
+        if (!authUser?._id || !localStream) return;
 
-        let peerConnection = null;
-
-        const createPeerConnection = () => {
-            if (peerConnection) {
-                peerConnection.destroy();
-            }
-
-            const newPeer = new Peer(authUser._id, {
-                host: 'peerjs.herokuapp.com',
-                secure: true,
-                port: 443,
-                config: {
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        {
-                            urls: 'turn:numb.viagenie.ca',
-                            username: 'webrtc@live.com',
-                            credential: 'muazkh'
-                        }
-                    ]
-                },
-                debug: 3
-            });
-
-            newPeer.on('open', () => {
-                console.log('Peer connection opened with ID:', authUser._id);
-                setPeer(newPeer);
-            });
-
-            newPeer.on('disconnected', () => {
-                console.log('Peer disconnected');
-                // Instead of reconnecting the destroyed peer, create a new one
-                setTimeout(createPeerConnection, 1000);
-            });
-
-            newPeer.on('error', (err) => {
-                console.error('Peer connection error:', err);
-                // Create new peer connection on error
-                setTimeout(createPeerConnection, 1000);
-            });
-
-            // Handle incoming calls
-            newPeer.on('call', async (call) => {
-                try {
-                    let stream = localStream;
-                    if (!stream) {
-                        stream = await navigator.mediaDevices.getUserMedia({
-                            video: true,
-                            audio: true
-                        });
-                        setLocalStream(stream);
-                        if (localVideoRef.current) {
-                            localVideoRef.current.srcObject = stream;
-                        }
+        const newPeer = new Peer(authUser._id, {
+            host: '0.peerjs.com',
+            secure: true,
+            port: 443,
+            debug: 3,
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { 
+                        urls: 'turn:numb.viagenie.ca',
+                        username: 'webrtc@live.com',
+                        credential: 'muazkh'
                     }
-                    
-                    call.answer(stream);
-                    setCurrentCall(call);
+                ]
+            },
+            pingInterval: 3000,
+            retryTimer: 1000,
+            reconnectTimer: 3000
+        });
 
-                    call.on('stream', (remoteStream) => {
-                        console.log('Received remote stream in incoming call');
-                        if (remoteVideoRef.current) {
-                            remoteVideoRef.current.srcObject = remoteStream;
-                        }
-                        setRemoteStream(remoteStream);
-                        setCallStatus('connected');
-                    });
-                } catch (err) {
-                    console.error('Error handling incoming call:', err);
-                }
-            });
+        // Add connection timeout handler
+        const connectionTimeout = setTimeout(() => {
+            if (!newPeer.open) {
+                console.error('Initial peer connection timeout');
+                setPeerStatus('error');
+                newPeer.destroy();
+                setPeer(null);
+            }
+        }, 15000);
 
-            peerConnection = newPeer;
-            return newPeer;
-        };
+        newPeer.on('open', (id) => {
+            clearTimeout(connectionTimeout);
+            console.log('Peer connection opened with ID:', id);
+            setPeer(newPeer);
+            setPeerStatus('connected');
+        });
 
-        createPeerConnection();
+        newPeer.on('error', (error) => {
+            console.error('Peer connection error:', error);
+            setPeerStatus('error');
+            if (error.type !== 'network' && error.type !== 'disconnected') {
+                setPeer(null);
+            }
+        });
+
+        newPeer.on('disconnected', () => {
+            console.log('Peer disconnected');
+            setPeerStatus('disconnected');
+            newPeer.reconnect();
+        });
+
+        newPeer.on('call', async (call) => {
+            console.log('Receiving call from:', call.peer);
+            try {
+                call.answer(localStream);
+                setCurrentCall(call);
+                setCallStatus('connected');
+
+                call.on('stream', (incomingStream) => {
+                    console.log('Received remote stream in call answer');
+                    if (remoteVideoRef.current) {
+                        remoteVideoRef.current.srcObject = incomingStream;
+                        setRemoteStream(incomingStream);
+                    }
+                });
+
+                call.on('close', () => {
+                    console.log('Call closed by peer');
+                    endCall();
+                });
+
+                call.on('error', (err) => {
+                    console.error('Call error:', err);
+                    endCall();
+                });
+            } catch (err) {
+                console.error('Error answering call:', err);
+                endCall();
+            }
+        });
 
         return () => {
-            if (peerConnection) {
-                peerConnection.destroy();
+            clearTimeout(connectionTimeout);
+            if (newPeer) {
+                newPeer.destroy();
             }
         };
-    }, [authUser?._id]);
+    }, [authUser?._id, localStream]);
 
     const makeCall = async (receiverId) => {
         try {
-            if (!peer || !peer.connected) {
-                console.log('Waiting for peer connection...');
-                await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => reject(new Error('Peer connection timeout')), 5000);
-                    const checkPeer = setInterval(() => {
-                        if (peer?.connected) {
-                            clearInterval(checkPeer);
+            if (!peer || !peer.open) {
+                const connectionPromise = new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error('Peer connection timeout'));
+                    }, 10000);
+
+                    const checkConnection = setInterval(() => {
+                        if (peer?.open) {
+                            clearInterval(checkConnection);
                             clearTimeout(timeout);
                             resolve();
                         }
-                    }, 100);
+                    }, 500);
+
+                    peer?.once('open', () => {
+                        clearInterval(checkConnection);
+                        clearTimeout(timeout);
+                        resolve();
+                    });
                 });
+
+                await connectionPromise;
             }
 
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: true,
-                audio: true
-            });
-
-            setLocalStream(stream);
-            if (localVideoRef.current) {
-                localVideoRef.current.srcObject = stream;
-                await localVideoRef.current.play().catch(e => console.error('Local play error:', e));
+            if (!localStream) {
+                throw new Error('Local stream not available');
             }
 
             console.log('Making call to:', receiverId);
-            const call = peer.call(receiverId, stream);
-            setCurrentCall(call);
-            setCallStatus('calling');
-
-            call.on('stream', (remoteStream) => {
-                console.log('Received remote stream in outgoing call');
-                if (remoteVideoRef.current) {
-                    remoteVideoRef.current.srcObject = remoteStream;
-                    remoteVideoRef.current.play().catch(e => console.error('Remote play error:', e));
+            const call = peer.call(receiverId, localStream);
+            
+            // Add call timeout
+            const callTimeout = setTimeout(() => {
+                if (callStatus !== 'connected') {
+                    call.close();
+                    throw new Error('Call connection timeout');
                 }
-                setRemoteStream(remoteStream);
+            }, 30000);
+
+            call.on('stream', (incomingStream) => {
+                clearTimeout(callTimeout);
+                setRemoteStream(incomingStream);
+                if (remoteVideoRef.current) {
+                    remoteVideoRef.current.srcObject = incomingStream;
+                }
                 setCallStatus('connected');
             });
 
-            call.on('error', (err) => {
-                console.error('Call error:', err);
-                setCallStatus('error');
+            call.on('close', () => {
+                clearTimeout(callTimeout);
+                endCall();
             });
+
+            call.on('error', (error) => {
+                clearTimeout(callTimeout);
+                console.error('Call error:', error);
+                endCall();
+            });
+
+            setCurrentCall(call);
+            setCallStatus('calling');
 
         } catch (err) {
             console.error('Error making call:', err);
             setCallStatus('error');
+            throw err;
         }
     };
 
-    const endCall = () => {
-        if (currentCall) {
-            currentCall.close();
-        }
+    const toggleAudio = () => {
         if (localStream) {
-            localStream.getTracks().forEach(track => track.stop());
+            const audioTrack = localStream.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !audioTrack.enabled;
+            }
         }
-        if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = null;
+    };
+
+    const toggleVideo = () => {
+        if (localStream) {
+            const videoTrack = localStream.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.enabled = !videoTrack.enabled;
+            }
         }
-        if (localVideoRef.current) {
-            localVideoRef.current.srcObject = null;
-        }
-        setCallStatus('idle');
-        setCurrentCall(null);
-        setRemoteStream(null);
-        setLocalStream(null);
     };
 
     return {
+        localVideoRef,
+        remoteVideoRef,
         callStatus,
         makeCall,
         endCall,
-        localVideoRef,
-        remoteVideoRef,
-        localStream,
-        remoteStream
+        peerStatus,
+        toggleAudio,
+        toggleVideo
     };
 };
 
