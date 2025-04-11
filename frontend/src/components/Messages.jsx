@@ -12,7 +12,8 @@ const Messages = () => {
     const [isVideoCallActive, setIsVideoCallActive] = useState(false);
     const [incomingCall, setIncomingCall] = useState(null);
     const { socket } = useSelector(store => store.socket);
-    const { authUser, selectedUser, onlineUsers } = useSelector(store => store.user);
+    const { selectedUser, onlineUsers } = useSelector(store => store.user);
+    const { authUser } = useSelector(store => store.auth);
     useGetMessages();
     useGetRealTimeMessage();
     const { messages } = useSelector(store => store.message);
@@ -40,12 +41,15 @@ const Messages = () => {
     }, [socket]);
 
     const handleMakeCall = () => {
-        if (socket && selectedUser) {
-            socket.emit('initiateCall', {
-                from: authUser._id,
-                to: selectedUser._id
-            });
+        if (!socket || !authUser || !selectedUser) {
+            toast.error('Cannot initiate call. Please try again.');
+            return;
         }
+        
+        socket.emit('initiateCall', {
+            from: authUser._id,
+            to: selectedUser._id
+        });
     };
 
     const handleAcceptCall = () => {

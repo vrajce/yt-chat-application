@@ -12,7 +12,7 @@ const useVideoCall = () => {
     const [currentCall, setCurrentCall] = useState(null);
     
     const { socket } = useSelector(store => store.socket);
-    const { authUser } = useSelector(store => store.user);
+    const { authUser } = useSelector(store => store.auth);
     
     const localVideoRef = useRef();
     const remoteVideoRef = useRef();
@@ -41,18 +41,49 @@ const useVideoCall = () => {
                     video: true,
                     audio: {
                         echoCancellation: true,
-                        noiseSuppression: true
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        sampleRate: 48000,
+                        channelCount: 2
                     }
                 });
+                
+                // Ensure audio tracks are enabled
+                stream.getAudioTracks().forEach(track => {
+                    track.enabled = true;
+                });
+
                 if (mounted) {
                     setLocalStream(stream);
                     if (localVideoRef.current) {
                         localVideoRef.current.srcObject = stream;
-                        await localVideoRef.current.play().catch(e => console.error('Local play error:', e));
+                        try {
+                            await localVideoRef.current.play();
+                            console.log('Local stream playing successfully');
+                        } catch (e) {
+                            console.error('Error playing local stream:', e);
+                        }
                     }
                 }
             } catch (err) {
                 console.error('Failed to get media devices:', err);
+                // Try again with just audio if video fails
+                try {
+                    const audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            sampleRate: 48000,
+                            channelCount: 2
+                        }
+                    });
+                    if (mounted) {
+                        setLocalStream(audioStream);
+                    }
+                } catch (audioErr) {
+                    console.error('Failed to get audio devices:', audioErr);
+                }
             }
         };
         initStream();
@@ -68,87 +99,101 @@ const useVideoCall = () => {
     useEffect(() => {
         if (!authUser?._id || !localStream) return;
 
-        const newPeer = new Peer(authUser._id, {
-            host: '0.peerjs.com',
-            secure: true,
-            port: 443,
-            debug: 3,
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { 
-                        urls: 'turn:numb.viagenie.ca',
-                        username: 'webrtc@live.com',
-                        credential: 'muazkh'
-                    }
-                ]
-            },
-            pingInterval: 3000,
-            retryTimer: 1000,
-            reconnectTimer: 3000
-        });
+        let newPeer = null;
+        let connectionTimeout = null;
 
-        // Add connection timeout handler
-        const connectionTimeout = setTimeout(() => {
-            if (!newPeer.open) {
-                console.error('Initial peer connection timeout');
-                setPeerStatus('error');
+        const initializePeer = () => {
+            if (newPeer) {
                 newPeer.destroy();
-                setPeer(null);
             }
-        }, 15000);
 
-        newPeer.on('open', (id) => {
-            clearTimeout(connectionTimeout);
-            console.log('Peer connection opened with ID:', id);
-            setPeer(newPeer);
-            setPeerStatus('connected');
-        });
+            newPeer = new Peer(authUser._id, {
+                host: '0.peerjs.com',
+                secure: true,
+                port: 443,
+                debug: 3,
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { 
+                            urls: 'turn:numb.viagenie.ca',
+                            username: 'webrtc@live.com',
+                            credential: 'muazkh'
+                        }
+                    ]
+                }
+            });
 
-        newPeer.on('error', (error) => {
-            console.error('Peer connection error:', error);
-            setPeerStatus('error');
-            if (error.type !== 'network' && error.type !== 'disconnected') {
-                setPeer(null);
-            }
-        });
+            connectionTimeout = setTimeout(() => {
+                if (!newPeer.open) {
+                    console.error('Initial peer connection timeout');
+                    setPeerStatus('error');
+                    newPeer.destroy();
+                    setPeer(null);
+                    // Retry connection after 5 seconds
+                    setTimeout(initializePeer, 5000);
+                }
+            }, 30000);
 
-        newPeer.on('disconnected', () => {
-            console.log('Peer disconnected');
-            setPeerStatus('disconnected');
-            newPeer.reconnect();
-        });
+            newPeer.on('open', (id) => {
+                clearTimeout(connectionTimeout);
+                console.log('Peer connection opened with ID:', id);
+                setPeer(newPeer);
+                setPeerStatus('connected');
+            });
 
-        newPeer.on('call', async (call) => {
-            console.log('Receiving call from:', call.peer);
-            try {
-                call.answer(localStream);
-                setCurrentCall(call);
-                setCallStatus('connected');
+            newPeer.on('error', (error) => {
+                console.error('Peer connection error:', error);
+                setPeerStatus('error');
+                if (error.type === 'unavailable-id') {
+                    // If ID is unavailable, try with a random ID
+                    newPeer = new Peer(null, {
+                        host: '0.peerjs.com',
+                        secure: true,
+                        port: 443
+                    });
+                }
+            });
 
-                call.on('stream', (incomingStream) => {
-                    console.log('Received remote stream in call answer');
-                    if (remoteVideoRef.current) {
-                        remoteVideoRef.current.srcObject = incomingStream;
-                        setRemoteStream(incomingStream);
-                    }
-                });
+            newPeer.on('disconnected', () => {
+                console.log('Peer disconnected');
+                setPeerStatus('disconnected');
+                newPeer.reconnect();
+            });
 
-                call.on('close', () => {
-                    console.log('Call closed by peer');
+            newPeer.on('call', async (call) => {
+                console.log('Receiving call from:', call.peer);
+                try {
+                    call.answer(localStream);
+                    setCurrentCall(call);
+                    setCallStatus('connected');
+
+                    call.on('stream', (incomingStream) => {
+                        console.log('Received remote stream in call answer');
+                        if (remoteVideoRef.current) {
+                            remoteVideoRef.current.srcObject = incomingStream;
+                            setRemoteStream(incomingStream);
+                        }
+                    });
+
+                    call.on('close', () => {
+                        console.log('Call closed by peer');
+                        endCall();
+                    });
+
+                    call.on('error', (err) => {
+                        console.error('Call error:', err);
+                        endCall();
+                    });
+                } catch (err) {
+                    console.error('Error answering call:', err);
                     endCall();
-                });
+                }
+            });
+        };
 
-                call.on('error', (err) => {
-                    console.error('Call error:', err);
-                    endCall();
-                });
-            } catch (err) {
-                console.error('Error answering call:', err);
-                endCall();
-            }
-        });
+        initializePeer();
 
         return () => {
             clearTimeout(connectionTimeout);
@@ -164,7 +209,7 @@ const useVideoCall = () => {
                 const connectionPromise = new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => {
                         reject(new Error('Peer connection timeout'));
-                    }, 10000);
+                    }, 30000);
 
                     const checkConnection = setInterval(() => {
                         if (peer?.open) {
@@ -172,7 +217,7 @@ const useVideoCall = () => {
                             clearTimeout(timeout);
                             resolve();
                         }
-                    }, 500);
+                    }, 1000);
 
                     peer?.once('open', () => {
                         clearInterval(checkConnection);
@@ -187,6 +232,11 @@ const useVideoCall = () => {
             if (!localStream) {
                 throw new Error('Local stream not available');
             }
+
+            // Ensure audio is enabled before making the call
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = true;
+            });
 
             console.log('Making call to:', receiverId);
             const call = peer.call(receiverId, localStream);
@@ -204,6 +254,14 @@ const useVideoCall = () => {
                 setRemoteStream(incomingStream);
                 if (remoteVideoRef.current) {
                     remoteVideoRef.current.srcObject = incomingStream;
+                    // Ensure remote audio is enabled
+                    incomingStream.getAudioTracks().forEach(track => {
+                        track.enabled = true;
+                    });
+                    // Try to play the remote stream
+                    remoteVideoRef.current.play()
+                        .then(() => console.log('Remote stream playing successfully'))
+                        .catch(e => console.error('Error playing remote stream:', e));
                 }
                 setCallStatus('connected');
             });
